@@ -9,3 +9,4 @@ xgboost
 lightgbm
 python-dotenv
 statsmodels
+openpyxl
