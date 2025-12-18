@@ -448,7 +448,7 @@ with tab3:
     if st.button("Run Causality Test"):
         with st.spinner("Running statistical tests..."):
             fig_causality = data_instance.test_granger_causality(
-                brand_name=brand_filter, category_name=cat_filter
+                brand_name=brand_filter, category_name=cat_filter, max_lag=6, business_level=level_filter
             )
             if fig_causality:
                 st.pyplot(fig_causality)
