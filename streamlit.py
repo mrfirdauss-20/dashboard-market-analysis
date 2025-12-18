@@ -14,6 +14,10 @@ from sklearn.metrics import r2_score, mean_absolute_error
 from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
 
+from dotenv import load_dotenv
+import os
+load_dotenv()
+
 def calculate_smape(y_true, y_pred):
     """Symmetric Mean Absolute Percentage Error"""
     return 100/len(y_true) * np.sum(2 * np.abs(y_pred - y_true) / (np.abs(y_true) + np.abs(y_pred)))
@@ -234,7 +238,7 @@ data_instance = load_data()
 # 4. SIDEBAR SETTINGS & FILTERS
 # ==========================================
 st.sidebar.header("⚙️ AI Settings")
-api_key = st.sidebar.text_input("OpenAI API Key", type="password", help="Paste your SK-... key here.")
+api_key = os.getenv("api_key", "")
 
 st.sidebar.header("🔍 Filter Data")
 
