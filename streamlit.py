@@ -34,7 +34,7 @@ def prepare_ml_data(data_instance, brand_filter=None, category_filter=None, busi
         brand_name=brand_filter, 
         category_name=category_filter, 
         business_level=business_level_filter,
-        max_lag=4 
+        max_lag=6 
     )
     
     best_lags = {}
