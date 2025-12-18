@@ -444,10 +444,10 @@ class DatasetCreator:
     # ==========================================
     # 8. GRANGER CAUSALITY (Returns Figure)
     # ==========================================
-    def test_granger_causality(self, brand_name=None, category_name=None, max_lag=4):
+    def test_granger_causality(self, brand_name=None, category_name=None, business_level=None, max_lag=4):
         warnings.filterwarnings("ignore")
         df = self.df_non_dup.copy()
-        df = self._apply_filters(df, brand_name, category_name)
+        df = self._apply_filters(df, brand_name, category_name, business_level)
         
         if df.empty: return None
 

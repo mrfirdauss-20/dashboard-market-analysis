@@ -24,47 +24,26 @@ def calculate_smape(y_true, y_pred):
 
 def prepare_ml_data(data_instance, brand_filter=None, category_filter=None, business_level_filter=None):
     """
-    1. Analyzes optimal lag for each channel (highest correlation).
-    2. Pivots data to wide format.
-    3. Creates dynamic Lag features based on step 1.
-    4. Handles NaNs.
+    Prepares data for ML. 
+    - If Brand selected: Keeps brand granularity (shifts per brand).
+    - If NO Brand selected: AGGREGATES (Sums) all data to monthly level before shifting.
     """
-    # --- STEP 1: Determine Optimal Lags ---
-    lag_df, _ = data_instance.analyze_spending_lag_impact(
-        brand_name=brand_filter, 
-        category_name=category_filter, 
-        business_level=business_level_filter,
-        max_lag=6 
-    )
-    
-    best_lags = {}
-    
-    if lag_df is not None and not lag_df.empty:
-        for channel in lag_df['Channel'].unique():
-            chan_data = lag_df[lag_df['Channel'] == channel]
-            
-            # --- FIX: Check for Valid Correlations ---
-            # Drop NaNs before finding max. If all are NaN, valid_corr will be empty.
-            valid_corr = chan_data['Correlation'].dropna()
-            
-            if not valid_corr.empty:
-                # Get the index of the max valid correlation
-                best_idx = valid_corr.idxmax()
-                best_row = chan_data.loc[best_idx]
-                best_lags[channel.lower()] = int(best_row['Lag_Months'])
-            else:
-                # If correlation is NaN (e.g., constant sales/spend), default to Lag 1
-                best_lags[channel.lower()] = 1
-    
-    # --- STEP 2: Filter & Pivot Data ---
+    # --- STEP 0: Filter Data ---
     df_raw = data_instance.df_non_dup.copy()
-    
     if business_level_filter: df_raw = df_raw[df_raw['business_level'] == business_level_filter]
     if category_filter: df_raw = df_raw[df_raw['category'] == category_filter]
     if brand_filter: df_raw = df_raw[df_raw['brand'] == brand_filter]
 
-    # Pivot to Wide Format
-    df_pivot = df_raw.pivot_table(index=['monthyear', 'brand'], columns='variable', values='Amount', aggfunc='sum').reset_index()
+    # Check if we are in "Aggregation Mode" (No specific brand selected)
+    is_aggregated = (brand_filter is None)
+
+    # --- STEP 1: Pivot Data ---
+    if is_aggregated:
+        # AGGREGATION MODE: Group by MonthYear only -> Sum everything
+        df_pivot = df_raw.pivot_table(index='monthyear', columns='variable', values='Amount', aggfunc='sum').reset_index()
+    else:
+        # SINGLE BRAND MODE: Keep Brand granularity
+        df_pivot = df_raw.pivot_table(index=['monthyear', 'brand'], columns='variable', values='Amount', aggfunc='sum').reset_index()
     
     # Clean Column Names
     rename_map = {c: c.replace('Spend on ', '').lower() for c in df_pivot.columns if 'Spend' in c}
@@ -74,21 +53,54 @@ def prepare_ml_data(data_instance, brand_filter=None, category_filter=None, busi
     if 'Sales' not in df_pivot.columns:
         return None, None
 
-    # --- STEP 3: Feature Engineering ---
-    df_pivot = df_pivot.sort_values(['brand', 'monthyear'])
+    # --- STEP 2: Determine Optimal Lags (Dynamic based on Aggregation) ---
+    best_lags = {}
+    dataset_channels = [c for c in df_pivot.columns if c in rename_map.values()]
     
-    # Always add Sales Lag 1
-    df_pivot['Sales_Lag1'] = df_pivot.groupby('brand')['Sales'].shift(1)
+    # We calculate correlations strictly on the current pivot data (Aggregated or Not)
+    # This avoids using the external function which might enforce brand granularity
     
-    # Add Dynamic Spend Lags
-    dataset_channels = [c for c in df_pivot.columns if c in best_lags.keys() or c in [k.replace('spend on ', '') for k in rename_map.values()]]
+    # Pre-calculate log data for correlation (handle zeros)
+    df_corr_calc = df_pivot.copy()
+    numeric_cols = ['Sales'] + dataset_channels
+    df_corr_calc[numeric_cols] = np.log1p(df_corr_calc[numeric_cols])
     
-    used_lags_info = {} 
+    for channel in dataset_channels:
+        best_corr = -1
+        best_lag = 1
+        
+        # Test lags 0 to 4
+        for lag in range(5):
+            if is_aggregated:
+                # Simple shift
+                corr = df_corr_calc['Sales'].corr(df_corr_calc[channel].shift(lag))
+            else:
+                # Grouped shift
+                corr = df_corr_calc['Sales'].corr(df_corr_calc.groupby('brand')[channel].shift(lag))
+            
+            # Keep track of max positive correlation
+            if not pd.isna(corr) and corr > best_corr:
+                best_corr = corr
+                best_lag = lag
+        
+        best_lags[channel] = best_lag
+
+    # --- STEP 3: Feature Engineering (Apply Lags) ---
+    if not is_aggregated:
+        df_pivot = df_pivot.sort_values(['brand', 'monthyear'])
+    else:
+        df_pivot = df_pivot.sort_values(['monthyear'])
+
+    # 1. Target Lag (Sales Y-1)
+    if is_aggregated:
+        df_pivot['Sales_Lag1'] = df_pivot['Sales'].shift(1)
+    else:
+        df_pivot['Sales_Lag1'] = df_pivot.groupby('brand')['Sales'].shift(1)
+    
+    # 2. Channel Lags
+    used_lags_info = {}
     
     for col in dataset_channels:
-        if col == 'Sales': continue
-        
-        # Default to 1 if analysis didn't find this channel
         optimal_lag = best_lags.get(col, 1)
         used_lags_info[col] = optimal_lag
         
@@ -97,7 +109,10 @@ def prepare_ml_data(data_instance, brand_filter=None, category_filter=None, busi
         if optimal_lag == 0:
             df_pivot[feature_name] = df_pivot[col]
         else:
-            df_pivot[feature_name] = df_pivot.groupby('brand')[col].shift(optimal_lag)
+            if is_aggregated:
+                df_pivot[feature_name] = df_pivot[col].shift(optimal_lag)
+            else:
+                df_pivot[feature_name] = df_pivot.groupby('brand')[col].shift(optimal_lag)
 
     # --- STEP 4: Final Cleanup ---
     df_model = df_pivot.dropna()
@@ -106,26 +121,30 @@ def prepare_ml_data(data_instance, brand_filter=None, category_filter=None, busi
 
 def run_ml_experiment(df_model):
     """
-    Runs LR, XGB, LGBM on the prepared data.
-    Returns: Results DF, Predictions DF, Feature Importance, Test Dates
+    Runs LR, XGB, LGBM.
+    Handles both Aggregated (No 'brand' col) and Granular data.
     """
-    # 1. Separate Features, Target, and Dates
-    drop_cols = ['monthyear', 'brand', 'Sales']
-    
+    # 1. Identify Columns to Drop (Metadata)
+    # We drop 'brand' only if it exists
+    drop_cols = ['monthyear', 'Sales']
+    if 'brand' in df_model.columns:
+        drop_cols.append('brand')
+
     # Ensure monthyear is datetime
     if not pd.api.types.is_datetime64_any_dtype(df_model['monthyear']):
         df_model['monthyear'] = pd.to_datetime(df_model['monthyear'])
 
+    # 2. Prepare X and y
     X = df_model[[c for c in df_model.columns if c not in drop_cols]]
     y = df_model['Sales']
-    dates = df_model['monthyear'] # Capture dates
+    dates = df_model['monthyear']
     
-    # 2. Time-based Split
+    # 3. Time-based Split (80/20)
     split_idx = int(len(X) * 0.8)
     
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-    dates_test = dates.iloc[split_idx:] # Split dates exactly the same way
+    dates_test = dates.iloc[split_idx:]
     
     results = []
     models = {
@@ -143,6 +162,7 @@ def run_ml_experiment(df_model):
             preds = np.maximum(preds, 0) 
             pred_dict[name] = preds
             
+            # Metrics
             r2 = r2_score(y_test, preds)
             smape = calculate_smape(y_test, preds)
             
@@ -155,7 +175,7 @@ def run_ml_experiment(df_model):
             st.error(f"Error training {name}: {e}")
         
     results_df = pd.DataFrame(results).set_index("Model")
-    pred_df = pd.DataFrame(pred_dict) # Don't set index yet, we return dates separately
+    pred_df = pd.DataFrame(pred_dict)
     
     # Reliability Check
     best_model = results_df.sort_values('R2 Score', ascending=False).iloc[0] if not results_df.empty else None
